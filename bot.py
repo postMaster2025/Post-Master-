@@ -27,21 +27,21 @@ def run_web_server():
 def send_request(url, data, max_retries=3):
     for attempt in range(max_retries):
         try:
-            response = requests.post(url, json=data, timeout=60)
+            response = requests.post(url, json=data, timeout=10)
             return response.json()
         except requests.exceptions.RequestException:
             if attempt < max_retries - 1:
-                time.sleep(2)
+                time.sleep(1)
     return None
 
 def get_request(url, params, max_retries=3):
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, params=params, timeout=60)
+            response = requests.get(url, params=params, timeout=10)
             return response.json()
         except requests.exceptions.RequestException:
             if attempt < max_retries - 1:
-                time.sleep(2)
+                time.sleep(1)
     return None
 
 def send_message(chat_id, text, reply_markup=None):
@@ -53,7 +53,6 @@ def send_message(chat_id, text, reply_markup=None):
 
 def send_media_group(chat_id, media_list, caption):
     url = f"{API_URL}/sendMediaGroup"
-    # Add caption to first media
     if media_list:
         media_list[0]['caption'] = caption
     data = {"chat_id": chat_id, "media": json.dumps(media_list)}
@@ -66,17 +65,27 @@ def edit_message(chat_id, message_id, text, reply_markup=None):
         data["reply_markup"] = json.dumps(reply_markup)
     return send_request(url, data)
 
+def delete_message(chat_id, message_id):
+    url = f"{API_URL}/deleteMessage"
+    data = {"chat_id": chat_id, "message_id": message_id}
+    return send_request(url, data)
+
 def answer_callback(callback_query_id):
     url = f"{API_URL}/answerCallbackQuery"
     send_request(url, {"callback_query_id": callback_query_id})
 
 def handle_start(chat_id):
-    user_data[chat_id] = {'step': 'awaiting_media', 'media_list': [], 'title': '', 'links': []}
+    user_data[chat_id] = {'step': 'awaiting_media', 'media_list': [], 'title': '', 'links': [], 'status_msg_id': None, 'messages_to_delete': []}
     remove_keyboard = {"remove_keyboard": True}
-    send_message(chat_id, "...", reply_markup=remove_keyboard)
+    msg1 = send_message(chat_id, "...", reply_markup=remove_keyboard)
+    if msg1 and 'result' in msg1:
+        user_data[chat_id]['messages_to_delete'].append(msg1['result']['message_id'])
     
     keyboard = {"inline_keyboard": [[{"text": "Done", "callback_data": "done_media"}]]}
-    send_message(chat_id, "স্বাগতম! পোস্ট তৈরি শুরু করা যাক।\n\nছবি, ভিডিও বা GIF পাঠান। একাধিক পাঠাতে পারেন।\n\nশেষ হলে 'Done' বাটনে ক্লিক করুন।", keyboard)
+    msg = send_message(chat_id, "স্বাগতম! পোস্ট তৈরি শুরু করা যাক।\n\nছবি, ভিডিও বা GIF পাঠান। একাধিক পাঠাতে পারেন।\n\nশেষ হলে 'Done' বাটনে ক্লিক করুন।", keyboard)
+    if msg and 'result' in msg:
+        user_data[chat_id]['status_msg_id'] = msg['result']['message_id']
+        user_data[chat_id]['messages_to_delete'].append(msg['result']['message_id'])
 
 def handle_callback(chat_id, message_id, callback_data, callback_query_id):
     answer_callback(callback_query_id)
@@ -113,30 +122,29 @@ def handle_message(chat_id, message):
         media_added = False
         if 'photo' in message:
             media_id = message['photo'][-1]['file_id']
-            user_data[chat_id]['media_list'].append({
-                'type': 'photo',
-                'media': media_id
-            })
+            user_data[chat_id]['media_list'].append({'type': 'photo', 'media': media_id})
             media_added = True
         elif 'video' in message:
             media_id = message['video']['file_id']
-            user_data[chat_id]['media_list'].append({
-                'type': 'video',
-                'media': media_id
-            })
+            user_data[chat_id]['media_list'].append({'type': 'video', 'media': media_id})
             media_added = True
         elif 'animation' in message:
             media_id = message['animation']['file_id']
-            user_data[chat_id]['media_list'].append({
-                'type': 'animation',
-                'media': media_id
-            })
+            user_data[chat_id]['media_list'].append({'type': 'animation', 'media': media_id})
             media_added = True
         
         if media_added:
             count = len(user_data[chat_id]['media_list'])
             keyboard = {"inline_keyboard": [[{"text": "Done", "callback_data": "done_media"}]]}
-            send_message(chat_id, f"✅ মিডিয়া যোগ করা হয়েছে। (মোট: {count}টি)\n\nআরও যোগ করুন অথবা 'Done' বাটনে ক্লিক করুন।", reply_markup=keyboard)
+            status_msg_id = user_data[chat_id].get('status_msg_id')
+            
+            if status_msg_id:
+                edit_message(chat_id, status_msg_id, f"✅ মিডিয়া যোগ করা হয়েছে। (মোট: {count}টি)\n\nআরও যোগ করুন অথবা 'Done' বাটনে ক্লিক করুন।", keyboard)
+            else:
+                msg = send_message(chat_id, f"✅ মিডিয়া যোগ করা হয়েছে। (মোট: {count}টি)\n\nআরও যোগ করুন অথবা 'Done' বাটনে ক্লিক করুন।", keyboard)
+                if msg and 'result' in msg:
+                    user_data[chat_id]['status_msg_id'] = msg['result']['message_id']
+                    user_data[chat_id]['messages_to_delete'].append(msg['result']['message_id'])
         return
     
     if 'text' not in message:
@@ -147,13 +155,23 @@ def handle_message(chat_id, message):
     if step == 'awaiting_title':
         user_data[chat_id]['title'] = text
         user_data[chat_id]['step'] = 'awaiting_link_url'
-        send_message(chat_id, "দারুণ! এবার প্রথম লিংকটি দিন:")
+        msg = send_message(chat_id, "দারুণ! এবার প্রথম লিংকটি দিন:")
+        if msg and 'result' in msg:
+            user_data[chat_id]['messages_to_delete'].append(msg['result']['message_id'])
+        if 'message_id' in message:
+            user_data[chat_id]['messages_to_delete'].append(message['message_id'])
     elif step == 'awaiting_link_url':
         user_data[chat_id]['temp_url'] = text
         user_data[chat_id]['step'] = 'awaiting_link_label'
         keyboard = {"inline_keyboard": [[{"text": "Skip", "callback_data": "skip_label"}]]}
-        send_message(chat_id, "লিংকটি গৃহীত হয়েছে। এখন এই লিংকের একটি নাম দিন (ঐচ্ছিক)।", keyboard)
+        msg = send_message(chat_id, "লিংকটি গৃহীত হয়েছে। এখন এই লিংকের একটি নাম দিন (ঐচ্ছিক)।", keyboard)
+        if msg and 'result' in msg:
+            user_data[chat_id]['messages_to_delete'].append(msg['result']['message_id'])
+        if 'message_id' in message:
+            user_data[chat_id]['messages_to_delete'].append(message['message_id'])
     elif step == 'awaiting_link_label':
+        if 'message_id' in message:
+            user_data[chat_id]['messages_to_delete'].append(message['message_id'])
         process_new_link(chat_id, None, text, False)
 
 def process_new_link(chat_id, message_id, label, is_callback):
@@ -164,7 +182,9 @@ def process_new_link(chat_id, message_id, label, is_callback):
         if is_callback:
             edit_message(chat_id, message_id, message)
         else:
-            send_message(chat_id, message)
+            msg = send_message(chat_id, message)
+            if msg and 'result' in msg:
+                user_data[chat_id]['messages_to_delete'].append(msg['result']['message_id'])
         generate_post(chat_id, message_id, is_callback)
         return
     user_data[chat_id]['step'] = 'awaiting_link_url'
@@ -173,7 +193,9 @@ def process_new_link(chat_id, message_id, label, is_callback):
     if is_callback:
         edit_message(chat_id, message_id, message, keyboard)
     else:
-        send_message(chat_id, message, keyboard)
+        msg = send_message(chat_id, message, keyboard)
+        if msg and 'result' in msg:
+            user_data[chat_id]['messages_to_delete'].append(msg['result']['message_id'])
 
 def generate_post(chat_id, message_id, is_callback):
     data = user_data.get(chat_id, {})
@@ -192,6 +214,11 @@ def generate_post(chat_id, message_id, is_callback):
         caption = f"{title}\n\n🎬 𝗩𝗜𝗗𝗘𝗢 👇👇\n\n📥 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝 𝐋𝐢𝐧𝐤𝐬 / 👀 𝐖𝐚𝐭𝐜𝗵 𝐎𝐧𝐥𝐢𝐧𝐞\n\n{links_text}\n\nFull hd++++8k video 🇽\nRomes hd 4k hd video🇽"
         
         media_list = data.get('media_list', [])
+        
+        # Delete all previous messages before posting
+        messages_to_delete = data.get('messages_to_delete', [])
+        for msg_id in messages_to_delete:
+            delete_message(chat_id, msg_id)
         
         if media_list:
             send_media_group(chat_id, media_list, caption)
@@ -213,13 +240,18 @@ def main():
     while True:
         try:
             url = f"{API_URL}/getUpdates"
-            updates = get_request(url, {"timeout": 50, "offset": offset})
+            updates = get_request(url, {"timeout": 0, "offset": offset})
             if updates and updates.get("ok"):
                 for update in updates.get("result", []):
                     offset = update["update_id"] + 1
                     if "message" in update:
                         message = update["message"]
                         chat_id = message["chat"]["id"]
+                        
+                        # Delete user's media messages immediately
+                        if "photo" in message or "video" in message or "animation" in message:
+                            delete_message(chat_id, message["message_id"])
+                        
                         if "text" in message:
                             text = message["text"]
                             if text in ["/start", "/newpost"]:
@@ -231,11 +263,9 @@ def main():
                     elif "callback_query" in update:
                         callback = update["callback_query"]
                         handle_callback(callback["message"]["chat"]["id"], callback["message"]["message_id"], callback["data"], callback["id"])
-            else:
-                time.sleep(5)
         except Exception as e:
             print(f"Error: {e}")
-            time.sleep(5)
+            time.sleep(1)
 
 if __name__ == "__main__":
     main()
